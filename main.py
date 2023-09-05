@@ -1,30 +1,27 @@
 import sys
+from PyQt5.QtWidgets import *
+from PyQt5 import uic
 
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtWidgets import QApplication, QWidget, QMainWindow, QPushButton
 
-# Subclass QMainWindow to customize
-class MainWindow(QMainWindow):
+class GUI(QMainWindow):
+
     def __init__(self):
-        super().__init__()
+        super(GUI, self).__init__()
+        uic.loadUi("mainwindow.ui", self)
+        self.show()
 
-        self.setWindowTitle("My App")
-        button = QPushButton("Press Me!")
-
-        # Set the central widget of the Window.
-        self.setCentralWidget(button)
+        self.testButton.clicked.connect(self.button_clicked)
 
 
-# If you know you won't use command line arguments QApplication([]) works too.
-app = QApplication(sys.argv)
-
-# Create a Qt widget, which will be our window.
-window = MainWindow()
-window.show()  # IMPORTANT!!!!! Windows are hidden by default.
-
-# Start the event loop.
-app.exec()
+    def button_clicked(self):
+        print("Clicked")
 
 
-# Your application won't reach here until you exit and the event
-# loop has stopped.
+def main():
+    app = QApplication([])
+    window = GUI()
+    app.exec_()
+
+
+if __name__ == "__main__":
+    main()
