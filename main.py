@@ -13,7 +13,8 @@ from functools import partial
 def on_track_change(window, *args, **kwargs):
     print("Track changed:", args, kwargs)
 
-    # Check if 'Track' exists in the dictionary and if it itself is a dictionary
+    # Check if 'Track' exists in the dictionary and if it itself
+    # is a dictionary
     track_info = args[1].get('Track', {})
     print("Track info:", track_info)  # Debugging line
 
@@ -22,7 +23,8 @@ def on_track_change(window, *args, **kwargs):
         album = track_info.get('Album', "Unknown")
         artist = track_info.get('Artist', "Unknown")
 
-        # Only emit the signal if at least one of the title, album, or artist is known
+        # Only emit the signal if at least one of the title, album,
+        # or artist is known
         if title != "Unknown" or album != "Unknown" or artist != "Unknown":
             # song_info = f"{title} - {album} Artist: {artist}"
             song_info = f"{title} - {artist}     "
@@ -66,12 +68,22 @@ class ScrollingLabel(QWidget):
             x = int(self.width() - self._offset)
 
             # Draw text twice to create a continuous scrolling effect
-            painter.drawText(QRect(x, 0, spaced_text_width, self.height()), Qt.AlignVCenter, spaced_text)
-            painter.drawText(QRect(x - spaced_text_width, 0, spaced_text_width, self.height()), Qt.AlignVCenter, spaced_text)
+            painter.drawText(
+                QRect(x, 0, spaced_text_width, self.height()),
+                Qt.AlignVCenter,
+                spaced_text
+            )
+            painter.drawText(
+                QRect(x - spaced_text_width, 0, spaced_text_width,
+                      self.height()),
+                Qt.AlignVCenter,
+                spaced_text
+            )
         else:
             # Center the text if it fits within the widget
-            x = max((self.width() - text_width) // 2, 0)  # Ensure x is not negative
-            painter.drawText(QRect(x, 0, self.width() - x, self.height()), Qt.AlignVCenter, self._text)
+            x = max((self.width() - text_width) // 2, 0)  # Ensure x is +tive
+            painter.drawText(QRect(x, 0, self.width() - x, self.height()),
+                             Qt.AlignVCenter, self._text)
 
             # Debug to check widget border size
             # painter.setPen(Qt.red)
@@ -91,7 +103,6 @@ class ScrollingLabel(QWidget):
             self._offset = 0  # Reset offset if text fits within the widget
 
         self.update()  # Trigger a repaint
-
 
     def update_text(self, new_text):
         self._text = new_text
@@ -113,10 +124,19 @@ class GUI(QMainWindow):
         self.trackChanged.connect(self.update_song_label)
         try:
             bus = SystemBus()
-            media_player = bus.get('org.bluez', '/org/bluez/hci0/dev_44_35_83_3E_0E_0A/player0')  # Replace with your device's MAC
-            media_player.PropertiesChanged.connect(partial(on_track_change, self))
+
+            media_player = bus.get('org.bluez',
+                                   ('/org/bluez/hci0/dev_44_35_83_3E_0E_0A/'
+                                    'player0')
+                                   )  # Replace with your device's MAC
+
+            media_player.PropertiesChanged.connect(partial(
+                on_track_change, self))
+
         except KeyError:
-            print("Failed to connect to the media player. Make sure the device is connected and try again.")
+            print("Failed to connect to the media player. "
+                  "Make sure the device is connected and try again.")
+
         self.dbus_thread.start()
 
         self.scrolling_label = ScrollingLabel("Nothing playing")
