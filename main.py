@@ -1,10 +1,8 @@
 # Get information about BT device player0 or fd0 using
 # dbus-monitor --system "type='signal',sender='org.bluez'"
-# Occasionally the object path /player0 is not available and /fd0 is used
-# instead. The player does not function properly if this is the case.
+# player0 and fd0 may have values other than 0. This is handled
+# appropriately.
 
-# TODO: Check for the fd0 case and reset either the dbus connection
-# of the bluetooth service.
 
 import subprocess
 import time
@@ -42,7 +40,7 @@ def get_connected_bluetooth_mac(bus_object, window):
 # Used to handle connections and disconnections of Bluetooth devices.
 def on_device_property_changed(window, *args, **kwargs):
     # print("All args:", args)  # Debugging line
-    # print("All kwargs:", kwargs) # Debugging line
+    # print("All kwargs:", kwargs)  # Debugging line
 
     interface_name = args[0]
     properties = args[1]
@@ -64,6 +62,33 @@ def on_device_property_changed(window, *args, **kwargs):
                     window.handle_disconnection()
     except Exception as e:
         print(f"An error occurred in on_device_property_changed: {e}")
+
+
+# The dbus player path can change as devices are connected
+# and disconnected. We cannot hardcode player0 as the path and must
+# therefore retrive it once we have the device MAC address.
+def find_media_player_path(bus_object, mac_address):
+    bluez_service = bus_object.get('org.bluez', '/')
+    managed_objects = bluez_service.GetManagedObjects()
+
+    for path, interfaces in managed_objects.items():
+        if 'org.bluez.MediaPlayer1' in interfaces:
+            if mac_address.replace(":", "_").lower() in path.lower():
+                return path
+    return None
+
+
+# Same thing as above except retrieving the path that deals with
+# volume controls. Typically "fd" followed by a number.
+def find_media_transport_path(bus_object, mac_address):
+    bluez_service = bus_object.get('org.bluez', '/')
+    managed_objects = bluez_service.GetManagedObjects()
+
+    for path, interfaces in managed_objects.items():
+        if 'org.bluez.MediaTransport1' in interfaces:
+            if mac_address.replace(":", "_").lower() in path.lower():
+                return path
+    return None
 
 
 # TODO: Depending on whether or not we also want to show album info
@@ -90,6 +115,13 @@ def on_track_change(window, *args, **kwargs):
             # song_info = f"{title} - {album} Artist: {artist}"
             song_info = f"{title} - {artist}     "
             window.trackChanged.emit(song_info)
+
+
+# Tracking volume changes to have a use for MediaTransport.
+# MediaTransport is not used in practice currently but that may or may
+# not change.
+def on_volume_change(window, *args, **kwargs):
+    print("Volume changed: ", args, kwargs)
 
 
 class GLibThread(QThread):
@@ -188,41 +220,76 @@ class GUI(QMainWindow):
 
         self.scrollingLabelPlaceholder.setLayout(layout)
 
+        # dbus init. Also found in handle_new_connection() below
         try:
+            # Make dbus connection.
             self.bus = SystemBus()
 
-            # Set the flag to process the PropertiesChanged signal
+            # Set the flag to process the PropertiesChanged signal.
+            # Used in on_track_change()
             self.ignore_properties_changed = False
 
+            # Format: dev_XX_XX_XX_XX_XX_XX
             self.bt_mac_address = get_connected_bluetooth_mac(self.bus, self)
 
             if self.bt_mac_address:
                 print(f"Bluetooth device MAC address: {self.bt_mac_address}")
-                device_path = (f'/org/bluez/hci0/'
-                               f'{self.bt_mac_address.replace(":", "_")}'
-                               f'/player0')
 
-                print("dpath", device_path)
+                # Format: /org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX/playerX
+                player_device_path = find_media_player_path(
+                    self.bus, self.bt_mac_address)
+                print("Device player path: ", player_device_path)
 
                 try:
-                    self.media_player = self.bus.get('org.bluez', device_path)
+                    if player_device_path:
+                        # Connect to dbus media player
+                        self.media_player = self.bus.get('org.bluez',
+                                                         player_device_path)
+                    else:
+                        print("No player device path!")
                 except Exception as e:
                     print(f"Couldn't get media player: {e}")
                     return
 
-                other_properties = self.media_player.GetAll('org.bluez'
-                                                            '.MediaPlayer1')
-                print("All properties:", other_properties)
+                other_player_properties = self.media_player.GetAll(
+                    'org.bluez.MediaPlayer1')
+                print("All media properties:", other_player_properties)
 
-                # Get the current song information
+                # Get the current song information to display song information
+                # on connect.
                 current_track = self.media_player.Get('org.bluez.MediaPlayer1',
                                                       'Track')
                 if current_track:
                     print("Initial track:", current_track)
                     self.update_label_with_track_info(current_track)
 
+                # Listen for changes and call on_track_change()
                 self.media_player.PropertiesChanged.connect(partial(
                     on_track_change, self))
+
+                # Format: /org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX/fdX
+                transport_device_path = find_media_transport_path(
+                    self.bus, self.bt_mac_address)
+                print("Device transport path: ", transport_device_path)
+
+                try:
+                    if transport_device_path:
+                        # Connect to dbus media transport
+                        self.media_transport = self.bus.get(
+                            'org.bluez', transport_device_path)
+                    else:
+                        print("No transport device path!")
+                except Exception as e:
+                    print(f"Couldn't get media transport: {e}")
+
+                # This may not be used in the final build but we'll
+                # set up volume anyway.
+                self.media_transport.PropertiesChanged.connect(
+                    partial(on_volume_change, self))
+
+                other_transport_properties = self.media_transport.GetAll(
+                    'org.bluez.MediaTransport1')
+                print("All transport properties:", other_transport_properties)
 
             else:
                 print("No connected Bluetooth device found.")
@@ -231,8 +298,16 @@ class GUI(QMainWindow):
         except Exception as e:
             print(f"An error occurred in GUI constructor: {e}")
 
+        # Now we are set up we can start the Bluetooth thread
         self.dbus_thread.start()
 
+    # Used for handling any new Bluetooth connection after program init.
+    # Despite the fact that this is pretty much completely repeated code
+    # to what's found in __init__ there is an additional time.sleep(2)
+    # below. If we run this on startup we have an unnecessary 2 second
+    # increase in start time. Without waiting 2 seconds below a race condition
+    # fails.
+    # See above code for comments.
     def handle_new_connection(self):
         try:
             # Set the flag to process the PropertiesChanged signal
@@ -243,11 +318,23 @@ class GUI(QMainWindow):
                 print(f"New Bluetooth device MAC address: "
                       f"{self.bt_mac_address}")
                 time.sleep(2)  # Make sure the media player object is ready
-                device_path = (f'/org/bluez/hci0/'
-                               f'{self.bt_mac_address.replace(":", "_")}'
-                               f'/player0')
 
-                self.media_player = self.bus.get('org.bluez', device_path)
+                player_device_path = find_media_player_path(
+                    self.bus, self.bt_mac_address)
+
+                try:
+                    if player_device_path:
+                        self.media_player = self.bus.get('org.bluez',
+                                                         player_device_path)
+                    else:
+                        print("No player device path!")
+                except Exception as e:
+                    print(f"Couldn't get media player: {e}")
+                    return
+
+                other_player_properties = self.media_player.GetAll(
+                    'org.bluez.MediaPlayer1')
+                print("All media properties:", other_player_properties)
 
                 # Get the current song information
                 current_track = self.media_player.Get('org.bluez.MediaPlayer1',
@@ -258,12 +345,35 @@ class GUI(QMainWindow):
 
                 self.media_player.PropertiesChanged.connect(partial(
                     on_track_change, self))
+
+                transport_device_path = find_media_transport_path(
+                    self.bus, self.bt_mac_address)
+
+                try:
+                    if transport_device_path:
+                        self.media_transport = self.bus.get(
+                            'org.bluez', transport_device_path)
+                    else:
+                        print("No transport device path!")
+                except Exception as e:
+                    print(f"Couldn't get media transport: {e}")
+
+                self.media_transport.PropertiesChanged.connect(
+                    partial(on_volume_change, self))
+
+                other_transport_properties = self.media_transport.GetAll(
+                    'org.bluez.MediaTransport1')
+                print("All transport properties:", other_transport_properties)
+
             else:
                 print("No connected Bluetooth device found.")
                 self.scrolling_label.update_text("No media device connected")
+
         except Exception as e:
             print(f"An error occurred in handle_new_connection(): {e}")
 
+    # According to dbus spec there is nothing we need to do with the bus
+    # object(?)
     def handle_disconnection(self):
         try:
             # Set a flag to ignore the PropertiesChanged signal
@@ -275,6 +385,7 @@ class GUI(QMainWindow):
             # Reset any internal state variables
             self.bt_mac_address = None
             self.media_player = None
+            self.media_transport = None
 
         except Exception as e:
             print(f"An error occurred in handle_disconnection(): {e}")
