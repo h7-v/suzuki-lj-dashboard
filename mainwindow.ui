@@ -17,10 +17,10 @@
    <widget class="QPushButton" name="volDownButton">
     <property name="geometry">
      <rect>
-      <x>260</x>
-      <y>160</y>
-      <width>80</width>
-      <height>23</height>
+      <x>190</x>
+      <y>210</y>
+      <width>200</width>
+      <height>100</height>
      </rect>
     </property>
     <property name="text">
@@ -30,10 +30,10 @@
    <widget class="QPushButton" name="volUpButton">
     <property name="geometry">
      <rect>
-      <x>350</x>
-      <y>160</y>
-      <width>80</width>
-      <height>23</height>
+      <x>470</x>
+      <y>210</y>
+      <width>200</width>
+      <height>100</height>
      </rect>
     </property>
     <property name="text">

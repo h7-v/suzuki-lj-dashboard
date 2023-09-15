@@ -3,6 +3,12 @@
 # player0 and fd0 may have values other than 0. This is handled
 # appropriately.
 
+# TODO: If Status becomes stopped from MediaPlayer1, clear the song label
+# TODO: Perhaps if there is a way to request what the current song it on
+# dbus then we should probably do that. Currently if the Bluetooth device
+# is connected but doesn't have a player active then no song is displayed.
+# This is fine but becomes a problem when Spotify if then opened, a song is
+# played but only an active of playing status is passed with no song info.
 
 import subprocess
 import time
