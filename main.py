@@ -23,30 +23,67 @@ from gi.repository import GLib
 from functools import partial
 
 
-def get_connected_bluetooth_mac(bus_object, window):
+def setup_general_device_listener(bus_object, window):
+    bluez_service = bus_object.get('org.bluez', '/')
+    bluez_service.InterfacesAdded.connect(partial(on_device_connected, window))
+    print("General device listener set up.")
+
+
+def on_device_connected(window, *args, **kwargs):
+    if not window.specific_listener_active:
+        print("A Bluetooth device has connected.")
+        window.handle_new_connection()
+
+
+# This function just returns the MAC address of the connected device.
+def get_connected_bluetooth_mac(bus_object):
+    print("get_connected_bluetooth_mac() called")
+
     bluez_service = bus_object.get('org.bluez', '/')
     managed_objects = bluez_service.GetManagedObjects()
 
-    # Loop through all managed objects to find connected device
     for path, interfaces in managed_objects.items():
         if 'org.bluez.Device1' in interfaces:
-            device = bus_object.get('org.bluez', path)
-
-            device.PropertiesChanged.connect(partial(
-                on_device_property_changed, window))
-
             device_properties = managed_objects[path]['org.bluez.Device1']
-            if 'Connected' in device_properties and \
-               device_properties['Connected']:
-                return path.split('/')[-1]  # Extract MAC address from the path
 
+            if ('Connected' in device_properties and
+                    device_properties['Connected']):
+                return path.split('/')[-1]  # Extract MAC address from the path
     return None  # Return None if no connected device is found
+
+
+# This function sets up the PropertiesChanged listener for the connected
+# device.
+def setup_device_connection(bus_object, window):
+    print("setup_device_connection() called")
+    mac_address = get_connected_bluetooth_mac(bus_object)
+    print("setup_device_connection() mac address:", mac_address)
+    if mac_address:
+        device_path = f"/org/bluez/hci0/{mac_address.replace(':', '_')}"
+        device = bus_object.get('org.bluez', device_path)
+
+        if (hasattr(window, 'device_properties_subscription') and
+                window.device_properties_subscription):
+            window.device_properties_subscription.disconnect()
+
+        window.device_properties_subscription = (
+            device.PropertiesChanged.connect(
+                partial(on_device_property_changed, window)
+            )
+        )
+
+        print("device.PropertiesChanged.connect() called")
+        return mac_address  # Return the MAC address for further use
+    else:
+        # print("No connected Bluetooth device found.")
+        return None
 
 
 # Used to handle connections and disconnections of Bluetooth devices.
 def on_device_property_changed(window, *args, **kwargs):
-    # print("All args:", args)  # Debugging line
-    # print("All kwargs:", kwargs)  # Debugging line
+    # print("on_device_property_changed() called")
+    # print("on_device_property_changed() args:", args)  # Debugging line
+    # print("on_device_property_changed() kwargs:", kwargs)  # Debugging line
 
     interface_name = args[0]
     properties = args[1]
@@ -66,6 +103,8 @@ def on_device_property_changed(window, *args, **kwargs):
                     print("A Bluetooth device has disconnected.")
                     # You can add your logic here to handle the disconnection
                     window.handle_disconnection()
+
+        # print("on_device_property_changed() finished gracefully")
     except Exception as e:
         print(f"An error occurred in on_device_property_changed: {e}")
 
@@ -97,42 +136,15 @@ def find_media_transport_path(bus_object, mac_address):
     return None
 
 
-# TODO: Depending on whether or not we also want to show album info
-# consider switching out commented code.
-def on_player_properties_change(window, *args, **kwargs):
-    if window.ignore_properties_changed:
-        return
-    print("Media properties changed:", args, kwargs)
+def find_device_object_path(bus_object, mac_address):
+    bluez_service = bus_object.get('org.bluez', '/')
+    managed_objects = bluez_service.GetManagedObjects()
 
-    # Extract track information from arguments
-    track_info = args[1].get('Track', {})
-    # print("Track info:", track_info)  # Debugging line
-
-    # Check if track information is available
-    if isinstance(track_info, dict):
-        title = track_info.get('Title', "Unknown")
-        # album = track_info.get('Album', "Unknown")
-        artist = track_info.get('Artist', "Unknown")
-
-        # Only emit the signal if at least one of the title, album,
-        # or artist is known
-        # if title != "Unknown" or album != "Unknown" or artist != "Unknown":
-        if title != "Unknown" or artist != "Unknown":
-            # song_info = f"{title} - {album} Artist: {artist}"
-            song_info = f"{title} - {artist}     "
-            window.trackChanged.emit(song_info)
-
-    status_info = args[1].get('Status')
-    if status_info:
-        if status_info == "playing" or status_info == "paused":
-            window.mediaPlayerStatusChanged.emit(status_info)
-
-
-# Tracking volume changes to have a use for MediaTransport.
-# MediaTransport is not used in practice currently but that may or may
-# not change.
-def on_transport_change(window, *args, **kwargs):
-    print("Transport properties changed: ", args, kwargs)
+    for path, interfaces in managed_objects.items():
+        if 'org.bluez.Device1' in interfaces:
+            if mac_address.replace(":", "_").lower() in path.lower():
+                return path
+    return None
 
 
 class GLibThread(QThread):
@@ -214,6 +226,7 @@ class ScrollingLabel(QWidget):
 class GUI(QMainWindow):
     trackChanged = pyqtSignal(str)
     mediaPlayerStatusChanged = pyqtSignal(str)
+    device_properties_subscription = None
 
     # Any changes made in __init__() must be reflected in
     # handle_new_connection(). See the note preceding this function.
@@ -244,6 +257,8 @@ class GUI(QMainWindow):
 
         self.scrollingLabelPlaceholder.setLayout(layout)
 
+        self.specific_listener_active = False
+
         # dbus init. Also found in handle_new_connection() below
         try:
             # Make dbus connection.
@@ -254,11 +269,14 @@ class GUI(QMainWindow):
             self.ignore_properties_changed = False
 
             # Format: dev_XX_XX_XX_XX_XX_XX
-            self.bt_mac_address = get_connected_bluetooth_mac(self.bus, self)
+            self.bt_mac_address = setup_device_connection(self.bus, self)
 
             if self.bt_mac_address:
                 print(f"Bluetooth device MAC address: {self.bt_mac_address}")
 
+                # ----------------------------------------
+                # ---------- PLAYER DEVICE INIT ----------
+                # ----------------------------------------
                 # Format: /org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX/playerX
                 player_device_path = find_media_player_path(
                     self.bus, self.bt_mac_address)
@@ -288,9 +306,17 @@ class GUI(QMainWindow):
                     self.update_label_with_track_info(current_track)
 
                 # Listen for changes and call on_player_properties_change()
-                self.media_player.PropertiesChanged.connect(partial(
-                    on_player_properties_change, self))
+                # Subscription so that we can call disconnect() to prevent
+                # multiple listeners being set up as devices connect and
+                # disconnect over time.
+                self.media_player_properties_subscription = (
+                    self.media_player.PropertiesChanged.connect(
+                        self.on_player_properties_change)
+                    )
 
+                # -------------------------------------------
+                # ---------- TRANSPORT DEVICE INIT ----------
+                # -------------------------------------------
                 # Format: /org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX/fdX
                 transport_device_path = find_media_transport_path(
                     self.bus, self.bt_mac_address)
@@ -322,14 +348,15 @@ class GUI(QMainWindow):
                         self.trackIsPlaying = False
                         self.playPauseButton.setText("||")
 
-                # This may not be used in the final build but we'll
-                # set up volume anyway.
-                self.media_transport.PropertiesChanged.connect(
-                    partial(on_transport_change, self))
+                self.media_transport_properties_subscription = (
+                    self.media_transport.PropertiesChanged.connect(
+                        self.on_transport_change)
+                    )
 
             else:
-                print("No connected Bluetooth device found.")
+                print("No connected Bluetooth device found at start up.")
                 self.scrolling_label.update_text("No media device connected")
+                setup_general_device_listener(self.bus, self)
 
         except Exception as e:
             print(f"An error occurred in GUI constructor: {e}")
@@ -351,7 +378,11 @@ class GUI(QMainWindow):
             # Set the flag to process the PropertiesChanged signal
             self.ignore_properties_changed = False
 
-            self.bt_mac_address = get_connected_bluetooth_mac(self.bus, self)
+            # self.media_player_properties_subscription.disconnect()
+            # self.media_transport_properties_subscription.disconnect()
+
+            self.bt_mac_address = setup_device_connection(self.bus, self)
+
             if self.bt_mac_address:
                 print(f"New Bluetooth device MAC address: "
                       f"{self.bt_mac_address}")
@@ -359,6 +390,7 @@ class GUI(QMainWindow):
 
                 player_device_path = find_media_player_path(
                     self.bus, self.bt_mac_address)
+                print("handle_new_connection()_ device connect run")
 
                 try:
                     if player_device_path:
@@ -381,8 +413,10 @@ class GUI(QMainWindow):
                     print("Initial track:", current_track)
                     self.update_label_with_track_info(current_track)
 
-                self.media_player.PropertiesChanged.connect(partial(
-                    on_player_properties_change, self))
+                self.media_player_properties_subscription = (
+                    self.media_player.PropertiesChanged.connect(
+                        self.on_player_properties_change)
+                    )
 
                 transport_device_path = find_media_transport_path(
                     self.bus, self.bt_mac_address)
@@ -412,12 +446,18 @@ class GUI(QMainWindow):
                         self.trackIsPlaying = False
                         self.playPauseButton.setText("||")
 
-                self.media_transport.PropertiesChanged.connect(
-                    partial(on_transport_change, self))
+                self.media_transport_properties_subscription = (
+                    self.media_transport.PropertiesChanged.connect(
+                        self.on_transport_change)
+                    )
 
+                self.specific_listener_active = True
             else:
                 print("No connected Bluetooth device found.")
                 self.scrolling_label.update_text("No media device connected")
+                setup_general_device_listener(self.bus, self)
+
+            print("handle_new_connection() called")
 
         except Exception as e:
             print(f"An error occurred in handle_new_connection(): {e}")
@@ -429,7 +469,7 @@ class GUI(QMainWindow):
             # Set a flag to ignore the PropertiesChanged signal
             self.ignore_properties_changed = True
 
-            # No track playing is no device connected
+            # No track playing if no device connected
             self.trackIsPlaying = False
 
             # Reset UI elements
@@ -441,6 +481,20 @@ class GUI(QMainWindow):
             self.media_player = None
             self.media_transport = None
 
+            # Clear up listeners so that when new devices connect
+            # we don't have more than one listener for media and transport
+            # active.
+            # Note: self.device_properties_subscription must remain connected
+            # to listen for new Bluetooth devices.
+            if self.media_player_properties_subscription:
+                self.media_player_properties_subscription.disconnect()
+            if self.media_transport_properties_subscription:
+                self.media_transport_properties_subscription.disconnect()
+            # if self.device_properties_subscription:
+                # self.device_properties_subscription.disconnect()
+
+            print("handle_disconnection() called")
+
         except Exception as e:
             print(f"An error occurred in handle_disconnection(): {e}")
 
@@ -451,6 +505,54 @@ class GUI(QMainWindow):
         elif status_info == "paused":
             self.trackIsPlaying = False
             self.playPauseButton.setText("|>")
+
+    def on_player_properties_change(self, *args, **kwargs):
+        if self.ignore_properties_changed:
+            return
+        print("Media properties changed:", args, kwargs)
+
+        if len(args) < 2 or not isinstance(args[1], dict):
+            print("Invalid arguments received.")
+            return
+
+        properties = args[1]
+        self.handle_track_change(properties.get('Track', {}))
+        self.handle_status_change(properties.get('Status'))
+
+    def handle_track_change(self, track_info):
+        if not isinstance(track_info, dict):
+            return
+
+        title = track_info.get('Title', "Unknown")
+        artist = track_info.get('Artist', "Unknown")
+
+        if title != "Unknown" or artist != "Unknown":
+            song_info = f"{title} - {artist}     "
+            self.trackChanged.emit(song_info)
+
+    def handle_status_change(self, status_info):
+        if not status_info:
+            return
+
+        if status_info in ["playing", "paused"]:
+            self.mediaPlayerStatusChanged.emit(status_info)
+
+    def on_transport_change(self, *args, **kwargs):
+        # Extract the 'State' property from the arguments.
+        state = args[1].get('State', None) if len(args) > 1 else None
+
+        if state is not None:
+            print(f"Transport state changed to: {state}")  # For debugging
+
+            if state == "active":
+                # Do the same thing as when the media player status
+                # is "playing".
+                self.mediaPlayerStatusChanged.emit("playing")
+
+            elif state == "idle":
+                # Do the same thing as when the media player status
+                # is "paused".
+                self.mediaPlayerStatusChanged.emit("paused")
 
     def update_label_with_track_info(self, track_info):
         song_info = "Unknown (waiting on device for info)"
