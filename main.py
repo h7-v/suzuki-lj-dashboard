@@ -99,14 +99,14 @@ def find_media_transport_path(bus_object, mac_address):
 
 # TODO: Depending on whether or not we also want to show album info
 # consider switching out commented code.
-def on_track_change(window, *args, **kwargs):
+def on_player_properties_change(window, *args, **kwargs):
     if window.ignore_properties_changed:
         return
-    print("Track changed:", args, kwargs)
+    print("Media properties changed:", args, kwargs)
 
     # Extract track information from arguments
     track_info = args[1].get('Track', {})
-    print("Track info:", track_info)  # Debugging line
+    # print("Track info:", track_info)  # Debugging line
 
     # Check if track information is available
     if isinstance(track_info, dict):
@@ -122,12 +122,17 @@ def on_track_change(window, *args, **kwargs):
             song_info = f"{title} - {artist}     "
             window.trackChanged.emit(song_info)
 
+    status_info = args[1].get('Status')
+    if status_info:
+        if status_info == "playing" or status_info == "paused":
+            window.mediaPlayerStatusChanged.emit(status_info)
+
 
 # Tracking volume changes to have a use for MediaTransport.
 # MediaTransport is not used in practice currently but that may or may
 # not change.
-def on_volume_change(window, *args, **kwargs):
-    print("Volume changed: ", args, kwargs)
+def on_transport_change(window, *args, **kwargs):
+    print("Transport properties changed: ", args, kwargs)
 
 
 class GLibThread(QThread):
@@ -208,17 +213,30 @@ class ScrollingLabel(QWidget):
 
 class GUI(QMainWindow):
     trackChanged = pyqtSignal(str)
+    mediaPlayerStatusChanged = pyqtSignal(str)
 
+    # Any changes made in __init__() must be reflected in
+    # handle_new_connection(). See the note preceding this function.
     def __init__(self):
         super(GUI, self).__init__()
         uic.loadUi("mainwindow.ui", self)
         self.show()
+
+        self.trackIsPlaying = False
+        # We need a way of tracking how audio transport has changed,
+        # whether that's on the bluetooth device end or if a button has been
+        # pushed.
+        self.playPauseInitiatedByButton = False
+        self.playPauseButton.clicked.connect(self.playPauseButton_clicked)
+        self.nextTrackButton.clicked.connect(self.nextTrackButton_clicked)
+        self.prevTrackButton.clicked.connect(self.prevTrackButton_clicked)
 
         self.volDownButton.clicked.connect(self.volDownButton_clicked)
         self.volUpButton.clicked.connect(self.volUpButton_clicked)
 
         self.dbus_thread = GLibThread()
         self.trackChanged.connect(self.update_song_label)
+        self.mediaPlayerStatusChanged.connect(self.handleMPStatusChange)
 
         self.scrolling_label = ScrollingLabel("Nothing playing")
         layout = QVBoxLayout()
@@ -232,7 +250,7 @@ class GUI(QMainWindow):
             self.bus = SystemBus()
 
             # Set the flag to process the PropertiesChanged signal.
-            # Used in on_track_change()
+            # Used in on_player_properties_change()
             self.ignore_properties_changed = False
 
             # Format: dev_XX_XX_XX_XX_XX_XX
@@ -269,9 +287,9 @@ class GUI(QMainWindow):
                     print("Initial track:", current_track)
                     self.update_label_with_track_info(current_track)
 
-                # Listen for changes and call on_track_change()
+                # Listen for changes and call on_player_properties_change()
                 self.media_player.PropertiesChanged.connect(partial(
-                    on_track_change, self))
+                    on_player_properties_change, self))
 
                 # Format: /org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX/fdX
                 transport_device_path = find_media_transport_path(
@@ -288,14 +306,26 @@ class GUI(QMainWindow):
                 except Exception as e:
                     print(f"Couldn't get media transport: {e}")
 
-                # This may not be used in the final build but we'll
-                # set up volume anyway.
-                self.media_transport.PropertiesChanged.connect(
-                    partial(on_volume_change, self))
-
                 other_transport_properties = self.media_transport.GetAll(
                     'org.bluez.MediaTransport1')
                 print("All transport properties:", other_transport_properties)
+
+                current_state = self.media_transport.Get(
+                    'org.bluez.MediaTransport1', 'State')
+
+                if current_state:
+                    print("Initial state:", current_state)
+                    if current_state == "idle":
+                        self.trackIsPlaying = False
+                        self.playPauseButton.setText("|>")
+                    elif current_state == "active":
+                        self.trackIsPlaying = False
+                        self.playPauseButton.setText("||")
+
+                # This may not be used in the final build but we'll
+                # set up volume anyway.
+                self.media_transport.PropertiesChanged.connect(
+                    partial(on_transport_change, self))
 
             else:
                 print("No connected Bluetooth device found.")
@@ -312,7 +342,9 @@ class GUI(QMainWindow):
     # to what's found in __init__ there is an additional time.sleep(2)
     # below. If we run this on startup we have an unnecessary 2 second
     # increase in start time. Without waiting 2 seconds below a race condition
-    # fails.
+    # fails, and because this sleep() is nested I would prefer not to turn
+    # this all into spaghetti. This function must be updated if changes are
+    # made in __init__()
     # See above code for comments.
     def handle_new_connection(self):
         try:
@@ -350,7 +382,7 @@ class GUI(QMainWindow):
                     self.update_label_with_track_info(current_track)
 
                 self.media_player.PropertiesChanged.connect(partial(
-                    on_track_change, self))
+                    on_player_properties_change, self))
 
                 transport_device_path = find_media_transport_path(
                     self.bus, self.bt_mac_address)
@@ -364,12 +396,24 @@ class GUI(QMainWindow):
                 except Exception as e:
                     print(f"Couldn't get media transport: {e}")
 
-                self.media_transport.PropertiesChanged.connect(
-                    partial(on_volume_change, self))
-
                 other_transport_properties = self.media_transport.GetAll(
                     'org.bluez.MediaTransport1')
                 print("All transport properties:", other_transport_properties)
+
+                current_state = self.media_transport.Get(
+                    'org.bluez.MediaTransport1', 'State')
+
+                if current_state:
+                    print("Initial state:", current_state)
+                    if current_state == "idle":
+                        self.trackIsPlaying = False
+                        self.playPauseButton.setText("|>")
+                    elif current_state == "active":
+                        self.trackIsPlaying = False
+                        self.playPauseButton.setText("||")
+
+                self.media_transport.PropertiesChanged.connect(
+                    partial(on_transport_change, self))
 
             else:
                 print("No connected Bluetooth device found.")
@@ -385,8 +429,12 @@ class GUI(QMainWindow):
             # Set a flag to ignore the PropertiesChanged signal
             self.ignore_properties_changed = True
 
+            # No track playing is no device connected
+            self.trackIsPlaying = False
+
             # Reset UI elements
             self.scrolling_label.update_text("No media device connected")
+            self.playPauseButton.setText("|>")
 
             # Reset any internal state variables
             self.bt_mac_address = None
@@ -396,17 +444,61 @@ class GUI(QMainWindow):
         except Exception as e:
             print(f"An error occurred in handle_disconnection(): {e}")
 
+    def handleMPStatusChange(self, status_info):
+        if status_info == "playing":
+            self.trackIsPlaying = True
+            self.playPauseButton.setText("||")
+        elif status_info == "paused":
+            self.trackIsPlaying = False
+            self.playPauseButton.setText("|>")
+
     def update_label_with_track_info(self, track_info):
+        song_info = "Unknown (waiting on device for info)"
         title = track_info.get('Title', "Unknown")
         album = track_info.get('Album', "Unknown")
         artist = track_info.get('Artist', "Unknown")
 
-        if title != "Unknown" or album != "Unknown" or artist != "Unknown":
-            song_info = f"{title} - {artist}     "
-            self.trackChanged.emit(song_info)
+        if title == "" and album == "" and artist == "":
+            song_info = "Device connected"
+        elif title != "Unknown" or album != "Unknown" or artist != "Unknown":
+            song_info = f"{title} - {artist}"
+
+        self.trackChanged.emit(song_info)
 
     def update_song_label(self, new_song):
         self.scrolling_label.update_text(f"{new_song}")
+
+    def playpause_track(self):
+        if self.trackIsPlaying:
+            try:
+                self.media_player.Pause()
+                print("Media pause command sent.")
+            except Exception as e:
+                print(f"Failed to send pause command: {e}")
+        elif not self.trackIsPlaying:
+            try:
+                self.media_player.Play()
+                print("Media play command sent.")
+            except Exception as e:
+                print(f"Failed to send play command: {e}")
+
+    def playPauseButton_clicked(self):
+        self.playPauseInitiatedByButton = True
+        self.playpause_track()
+
+    def nextTrackButton_clicked(self):
+        try:
+            self.media_player.Next()
+            print("Next track command sent.")
+        except Exception as e:
+            print(f"Failed to send next track command: {e}")
+
+    def prevTrackButton_clicked(self):
+        try:
+            self.media_player.Previous()
+            print("Previous track command sent.")
+        except Exception as e:
+            print(f"Failed to send previous track command: {e}")
 
     def volDownButton_clicked(self):
         subprocess.run(["amixer", "set", "Master", "--", "5%-"])
